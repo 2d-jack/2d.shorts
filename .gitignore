@@ -1,0 +1,29 @@
+# Secrets -- never commit YouTube session cookies
+cookies.txt
+*.cookies
+
+# Runtime data / outputs
+webui_data/
+shorts_output/
+*.mp4
+*.wav
+*.ass
+transcript.json
+
+# Models
+*.pt
+*.bin
+*.onnx
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Local editor/agent config
+.claude/

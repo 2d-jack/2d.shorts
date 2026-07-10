@@ -1,0 +1,9 @@
+# Core pipeline
+faster-whisper>=1.0
+yt-dlp>=2025.1.1
+opencv-python-headless>=4.9
+scenedetect>=0.6.4
+
+# Face detection (much better than the Haar-only fallback; the code degrades
+# gracefully if this wheel isn't available for your Python version)
+mediapipe>=0.10.14

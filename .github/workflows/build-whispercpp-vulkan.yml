@@ -1,0 +1,112 @@
+# Builds whisper.cpp (official ggml-org source, pinned tag) with the Vulkan
+# backend and publishes the binaries as release assets on THIS repo.
+#
+# Why: the upstream project ships no Vulkan builds for Windows/Linux, and we
+# don't want to point users at random community binaries. make_shorts.py's
+# "vulkan" whisper engine downloads these assets on first use, giving AMD and
+# Intel GPUs (e.g. an RX 550) GPU-accelerated transcription.
+#
+# Trigger: push a tag like  whispercpp-v1.9.1  (the part after "whispercpp-"
+# is the upstream whisper.cpp tag to build).
+
+name: build-whispercpp-vulkan
+
+on:
+  push:
+    tags:
+      - "whispercpp-*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Compute upstream tag
+        id: ver
+        shell: bash
+        run: echo "upstream=${GITHUB_REF_NAME#whispercpp-}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout whisper.cpp
+        uses: actions/checkout@v4
+        with:
+          repository: ggml-org/whisper.cpp
+          ref: ${{ steps.ver.outputs.upstream }}
+
+      # The full official LunarG SDK, not a lightweight headers-only action:
+      # ggml's Vulkan build shells out to glslc to compile its shaders, which
+      # only the real SDK ships.
+      - name: Install Vulkan SDK
+        env:
+          VULKAN_VERSION: 1.4.313.2
+        run: |
+          curl.exe -o "$env:RUNNER_TEMP\VulkanSDK-Installer.exe" -L "https://sdk.lunarg.com/sdk/download/$env:VULKAN_VERSION/windows/vulkansdk-windows-X64-$env:VULKAN_VERSION.exe"
+          & "$env:RUNNER_TEMP\VulkanSDK-Installer.exe" --accept-licenses --default-answer --confirm-command install | Out-Null
+          Add-Content $env:GITHUB_ENV "VULKAN_SDK=C:\VulkanSDK\$env:VULKAN_VERSION"
+          Add-Content $env:GITHUB_PATH "C:\VulkanSDK\$env:VULKAN_VERSION\Bin"
+
+      - name: Build (Vulkan, static)
+        run: |
+          glslc --version
+          cmake -B build -DGGML_VULKAN=1 -DBUILD_SHARED_LIBS=OFF -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON
+          cmake --build build --config Release -j --target whisper-cli
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p pkg
+          # static build: whisper-cli.exe is self-contained (vulkan-1.dll
+          # comes from the user's GPU driver at runtime)
+          cp build/bin/Release/whisper-cli.exe pkg/
+          cp LICENSE pkg/LICENSE.whisper.cpp.txt
+          cd pkg && 7z a ../whispercpp-vulkan-win-x64.zip *
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: whispercpp-vulkan-win-x64.zip
+          name: "whisper.cpp Vulkan builds (${{ steps.ver.outputs.upstream }})"
+          body: >
+            whisper.cpp ${{ steps.ver.outputs.upstream }} built from official
+            source with GGML_VULKAN=1, used by 2d.shorts for GPU transcription
+            on non-NVIDIA cards. Not for direct download by humans -- the app
+            fetches these automatically.
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Compute upstream tag
+        id: ver
+        run: echo "upstream=${GITHUB_REF_NAME#whispercpp-}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout whisper.cpp
+        uses: actions/checkout@v4
+        with:
+          repository: ggml-org/whisper.cpp
+          ref: ${{ steps.ver.outputs.upstream }}
+
+      - name: Install Vulkan SDK
+        run: |
+          wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc
+          sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-noble.list https://packages.lunarg.com/vulkan/lunarg-vulkan-noble.list
+          sudo apt-get update
+          sudo apt-get install -y vulkan-sdk
+
+      - name: Build (Vulkan, static)
+        run: |
+          cmake -B build -DGGML_VULKAN=1 -DBUILD_SHARED_LIBS=OFF -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON
+          cmake --build build --config Release -j --target whisper-cli
+
+      - name: Package
+        run: |
+          mkdir -p pkg
+          cp build/bin/whisper-cli pkg/
+          cp LICENSE pkg/LICENSE.whisper.cpp.txt
+          tar -czf whispercpp-vulkan-linux-x64.tar.gz -C pkg .
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: whispercpp-vulkan-linux-x64.tar.gz
+          name: "whisper.cpp Vulkan builds (${{ steps.ver.outputs.upstream }})"
