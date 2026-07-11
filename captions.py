@@ -21,6 +21,8 @@ Usage:
 
 import argparse
 import json
+import re
+import shutil
 import subprocess
 
 
@@ -151,11 +153,41 @@ def build_ass_animated(chunks) -> str:
     return "\n".join(lines)
 
 
-def burn_captions(video_path: str, ass_path: str, output_path: str):
+_BURN_FFMPEG = "unresolved"
+
+
+def _burn_ffmpeg():
+    """Returns the first ffmpeg binary whose build has the libass 'ass'
+    filter, or None. Homebrew's current ffmpeg bottle dropped libass, but
+    the keg-only ffmpeg@7 bottle still has it, so the common keg paths are
+    checked after PATH."""
+    global _BURN_FFMPEG
+    if _BURN_FFMPEG == "unresolved":
+        _BURN_FFMPEG = None
+        candidates = [
+            "ffmpeg",
+            "/opt/homebrew/opt/ffmpeg@7/bin/ffmpeg",   # Apple Silicon brew keg
+            "/usr/local/opt/ffmpeg@7/bin/ffmpeg",      # Intel mac brew keg
+        ]
+        for candidate in candidates:
+            try:
+                out = subprocess.run(
+                    [candidate, "-hide_banner", "-filters"],
+                    capture_output=True, text=True, timeout=15,
+                )
+            except (OSError, subprocess.SubprocessError):
+                continue
+            if re.search(r"\s(ass)\s+V->V", out.stdout):
+                _BURN_FFMPEG = candidate
+                break
+    return _BURN_FFMPEG
+
+
+def burn_captions(video_path: str, ass_path: str, output_path: str, ffmpeg_bin: str = "ffmpeg"):
     """Burns the .ass subtitle file into the video using ffmpeg/libass."""
     escaped = ass_path.replace("\\", "\\\\").replace(":", "\\:")
     cmd = [
-        "ffmpeg", "-y", "-i", video_path,
+        ffmpeg_bin, "-y", "-i", video_path,
         "-vf", f"ass={escaped}",
         "-c:v", "libx264", "-c:a", "copy",
         "-loglevel", "error",
@@ -175,7 +207,17 @@ def add_captions(video_path, transcript_segments, clip_start, clip_end, output_p
     with open(ass_path, "w") as f:
         f.write(ass_content)
 
-    burn_captions(video_path, ass_path, output_path)
+    ffmpeg_bin = _burn_ffmpeg()
+    if ffmpeg_bin is None:
+        # A short without burned captions beats no short at all. Keep the
+        # .ass sidecar so the captions aren't lost, and say how to get them
+        # burned in.
+        print("    (no ffmpeg build with libass found -- saving the short "
+              "WITHOUT burned captions; subtitles kept next to it as .ass.\n"
+              "     On macOS: brew install ffmpeg@7)")
+        shutil.copyfile(video_path, output_path)
+        return len(chunks)
+    burn_captions(video_path, ass_path, output_path, ffmpeg_bin)
     return len(chunks)
 
 
