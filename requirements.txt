@@ -1,7 +1,15 @@
 # Core pipeline
 faster-whisper>=1.0
 yt-dlp>=2025.1.1
-opencv-python-headless>=4.9
+# OpenCV must stay below 5: the 5.x wheels no longer bundle the Haar cascade
+# XMLs smart_crop's face tracking loads. mediapipe and scenedetect pull in
+# opencv-contrib-python / opencv-python transitively, and all three variants
+# unpack into the same cv2/ directory (last one installed wins) -- so the
+# contrib and plain wheels have to be pinned too, or an unpinned 5.x wheel
+# silently clobbers the pinned one.
+opencv-python-headless>=4.9,<5
+opencv-python>=4.9,<5
+opencv-contrib-python>=4.9,<5
 scenedetect>=0.6.4
 
 # Face detection (much better than the Haar-only fallback; the code degrades

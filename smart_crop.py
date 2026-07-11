@@ -67,6 +67,7 @@ class _FaceDetector:
         self._mp_detectors = []
         self._frontal = None
         self._profile = None
+        self._haar_ok = True
         if _MEDIAPIPE_AVAILABLE:
             try:
                 self._mp_detectors = [
@@ -83,17 +84,25 @@ class _FaceDetector:
 
     def _haar_cascades(self):
         if self._frontal is None:
-            self._frontal = cv2.CascadeClassifier(
-                cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-            )
-            self._profile = cv2.CascadeClassifier(
-                cv2.data.haarcascades + "haarcascade_profileface.xml"
-            )
+            frontal_xml = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+            profile_xml = cv2.data.haarcascades + "haarcascade_profileface.xml"
+            self._frontal = cv2.CascadeClassifier(frontal_xml)
+            self._profile = cv2.CascadeClassifier(profile_xml)
+            # OpenCV 5.x wheels stopped bundling the cascade XMLs, and a
+            # CascadeClassifier constructs "successfully" even when its file
+            # is missing -- detectMultiScale then aborts the whole clip.
+            # Treat unusable cascades as "Haar found no faces" instead.
+            if self._frontal.empty() or self._profile.empty():
+                self._haar_ok = False
+                print("    (Haar cascade data missing from this OpenCV "
+                      "install -- skipping Haar face detection)")
         return self._frontal, self._profile
 
     def _detect_haar(self, frame):
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         frontal, profile = self._haar_cascades()
+        if not self._haar_ok:
+            return []
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         faces = list(frontal.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(40, 40)))
         if not faces:
             faces = list(profile.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(40, 40)))
