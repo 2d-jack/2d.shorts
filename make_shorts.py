@@ -129,6 +129,13 @@ def download_video(url: str, workdir: str, cookies_file: str = None) -> str:
         cmd += ["--cookies", cookies_file]
     cmd.append(url)
     subprocess.run(cmd, check=True)
+    # yt-dlp exits 0 on channel/playlist pages that yield zero videos; catch
+    # that here so the user sees the real problem instead of ffmpeg failing
+    # on a missing file several steps later.
+    if not os.path.exists(out_path):
+        sys.exit(f"Download finished but no video file was produced.\n"
+                 f"The URL probably doesn't point at a single video -- check it "
+                 f"for typos or stray characters: {url}")
     return out_path
 
 
@@ -376,6 +383,13 @@ def main():
 
     if not args.input:
         parser.error("input is required (a YouTube URL or a local video file)")
+
+    # Shell tab-completion escapes ? and = in pasted URLs, and inside quotes
+    # those backslashes reach us literally (watch\?v\=...). Backslash is never
+    # a valid character in a video URL, so strip them instead of letting
+    # yt-dlp chase a mangled address through its generic extractor.
+    if is_url(args.input):
+        args.input = args.input.replace("\\", "")
 
     if args.vertical:
         args.reframe_mode = "smart_crop"
