@@ -69,7 +69,10 @@ run() { # run "<description>" <cmd...>
     local _junk; ask _junk "  ${DIM}press Enter to run it...${RST}"
     # </dev/null: under `curl | bash` stdin IS the rest of this script --
     # a command that reads stdin (installers, apt, brew) would swallow it.
-    "$@" </dev/null || die "Command failed: $*"
+    if ! "$@" </dev/null; then
+      [ "${RUN_SOFT:-0}" = "1" ] && { warn "$desc failed"; return 1; }
+      die "Command failed: $*"
+    fi
     ok "$desc"
   else
     # Run in the background and spin a little braille loader on top of it,
@@ -93,6 +96,7 @@ run() { # run "<description>" <cmd...>
     else
       echo "${RED}✗ $desc failed.${RST} Last lines of the log:"
       tail -15 "$LOG" | sed 's/^/    /'
+      [ "${RUN_SOFT:-0}" = "1" ] && return 1
       die "Install aborted"
     fi
   fi
@@ -146,7 +150,13 @@ apt_state() {
   st="$(dpkg-query -W -f='${Status} ${Version}' "$1" 2>/dev/null)"
   case "$st" in "install ok installed "*) inst="${st##* }" ;; *) echo missing; return ;; esac
   cand="$(apt-cache policy "$1" 2>/dev/null | awk '/Candidate:/ {print $2; exit}')"
-  if [ -n "$cand" ] && [ "$cand" != "(none)" ] && [ "$cand" != "$inst" ]; then echo outdated; else echo ok; fi
+  # compare-versions: a newer version you installed yourself (PPA, .deb) is
+  # never treated as outdated just because the repo's differs.
+  if [ -n "$cand" ] && [ "$cand" != "(none)" ] && dpkg --compare-versions "$cand" gt "$inst"; then
+    echo outdated
+  else
+    echo ok
+  fi
 }
 
 # dnf_state <pkg> -> prints missing | outdated | ok
@@ -158,7 +168,17 @@ dnf_state() {
 
 # Python version helpers
 py_minor() { "$1" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null; }
-py_supported() { case "$1" in 3.9|3.10|3.11|3.12) return 0 ;; *) return 1 ;; esac; }
+# macOS keeps the old 3.9-3.12 window. Linux takes ANY Python >= 3.9 -- the
+# newest one installed is tried first, and requirements.txt picks matching
+# package versions (e.g. the newer mediapipe on 3.13+).
+py_supported() {
+  [ -n "$1" ] || return 1
+  if [ "$PLATFORM" = "mac" ]; then
+    case "$1" in 3.9|3.10|3.11|3.12) return 0 ;; *) return 1 ;; esac
+  fi
+  ! version_lt "$1" "3.9"
+}
+run_soft() { RUN_SOFT=1 run "$@"; local st=$?; return $st; }
 
 # Ollama: version of the installed CLI, and of the server that's actually running
 ollama_client_version() {
@@ -316,13 +336,13 @@ else
     need_sudo
     run "Refresh package lists" $SUDO apt-get update -y
     TODO=""
-    for spec in ffmpeg:ffmpeg git:git curl:curl nodejs:node python3-venv:; do
+    for spec in ffmpeg:ffmpeg git:git curl:curl nodejs:node; do
       pkg="${spec%%:*}"; cmd="${spec#*:}"
       case "$(apt_state "$pkg")" in
         ok)       ok "$pkg already installed (latest)" ;;
         outdated) TODO="$TODO $pkg" ;;
         missing)
-          if [ -n "$cmd" ] && have "$cmd"; then ok "$cmd found at $(command -v "$cmd") (not from apt -- leaving it as is)"
+          if have "$cmd"; then ok "$cmd found at $(command -v "$cmd") (not from apt -- leaving it as is)"
           else TODO="$TODO $pkg"; fi ;;
       esac
     done
@@ -355,40 +375,78 @@ else
   fi
 fi
 
-# ---------- 5. find a Python that mediapipe supports (3.9 - 3.12) ----------
-PYBIN=""
-for cand in python3.12 python3.11 python3.10 python3.9 python3; do
-  if have "$cand" && py_supported "$(py_minor "$cand")"; then PYBIN="$(command -v "$cand")"; break; fi
-done
-if [ -z "$PYBIN" ]; then
+# ---------- 5. find Python ----------
+# Linux: use the NEWEST Python already installed (3.14, 3.13, ...) -- never
+# install an older one just because it's "the supported version". All
+# installed Pythons >= 3.9 become candidates, newest first; if the packages
+# can't be installed for one (step 7), the next older one is tried.
+# macOS: unchanged -- newest installed Python in the 3.9-3.12 window.
+PY_CANDIDATES=""
+if [ "$PLATFORM" = "linux" ]; then
+  PY_LIST=""
+  for cand in $(compgen -c python3 2>/dev/null | grep -E '^python3(\.[0-9]+)?$' | sort -u); do
+    p="$(command -v "$cand" 2>/dev/null)" || continue
+    v="$(py_minor "$p")"
+    py_supported "$v" || continue
+    PY_LIST="$PY_LIST$v $p
+"
+  done
+  # newest first, one interpreter per version
+  PY_CANDIDATES="$(printf '%s' "$PY_LIST" | sort -t' ' -k1,1 -rV | awk '!seen[$1]++ {print $2}')"
+else
+  for cand in python3.12 python3.11 python3.10 python3.9 python3; do
+    if have "$cand" && py_supported "$(py_minor "$cand")"; then PY_CANDIDATES="$(command -v "$cand")"; break; fi
+  done
+fi
+
+if [ -z "$PY_CANDIDATES" ]; then
+  # No usable Python at all -> install the distro's CURRENT python3 (Linux),
+  # or 3.12 on macOS (unchanged).
   if [ "$PLATFORM" = "mac" ]; then
     run "Install Python 3.12 (your python3 is too new/old for mediapipe)" brew install python@3.12
-    PYBIN="$(brew --prefix)/opt/python@3.12/bin/python3.12"
+    PY_CANDIDATES="$(brew --prefix)/opt/python@3.12/bin/python3.12"
   elif have apt-get; then
     need_sudo
-    run "Install Python 3.12" $SUDO apt-get install -y python3.12 python3.12-venv
-    PYBIN="$(command -v python3.12 || true)"
+    run "Install Python 3" $SUDO apt-get install -y python3 python3-venv
+    PY_CANDIDATES="$(command -v python3 || true)"
   elif have dnf; then
     need_sudo
-    run "Install Python 3.12" $SUDO dnf install -y python3.12
-    PYBIN="$(command -v python3.12 || true)"
+    run "Install Python 3" $SUDO dnf install -y python3
+    PY_CANDIDATES="$(command -v python3 || true)"
   fi
-  [ -n "$PYBIN" ] || die "Couldn't find or install Python 3.9-3.12. Install one and re-run."
-else
-  PYV="$(py_minor "$PYBIN")"
-  # If this Python came from a package manager, keep it on the latest patch release.
-  if [ "$PLATFORM" = "mac" ] && brew list --formula --versions "python@$PYV" >/dev/null 2>&1; then
+  [ -n "$PY_CANDIDATES" ] || die "Couldn't find or install Python 3.9 or newer. Install one and re-run."
+elif [ "$PLATFORM" = "mac" ]; then
+  PYV="$(py_minor "$PY_CANDIDATES")"
+  # If this Python came from Homebrew, keep it on the latest patch release.
+  if brew list --formula --versions "python@$PYV" >/dev/null 2>&1; then
     brew_ensure "python@$PYV" "" "Python for the app"
-  elif have apt-get && [ "$PYBIN" != "$(command -v python3 2>/dev/null)" ]; then
-    # python3 itself was covered via python3-venv above; a side-by-side
-    # python3.X needs its OWN -venv package or `-m venv` fails (no ensurepip).
-    case "$(apt_state "python$PYV-venv")" in
-      ok) : ;;
-      *) need_sudo; run "Install / update python$PYV-venv" $SUDO apt-get install -y "python$PYV" "python$PYV-venv" ;;
-    esac
   fi
 fi
+PYBIN="$(printf '%s\n' "$PY_CANDIDATES" | head -1)"
 ok "Python: $("$PYBIN" --version 2>&1) ($PYBIN)"
+if [ "$PLATFORM" = "linux" ] && [ "$(printf '%s\n' "$PY_CANDIDATES" | wc -l)" -gt 1 ]; then
+  echo "  ${DIM}(fallbacks if packages aren't available for it yet: $(printf '%s\n' "$PY_CANDIDATES" | sed 1d | xargs -n1 basename | tr '\n' ' '))${RST}"
+fi
+
+# py_venv_ready <python> -> make sure `<python> -m venv` will work.
+# Debian/Ubuntu split venv/ensurepip into a pythonX.Y-venv package; install
+# it ONLY for this exact Python, ONLY if it's missing, ONLY if apt owns that
+# Python. A Python built from source / pyenv / uv already has it.
+py_venv_ready() {
+  local p="$1" v pkg
+  "$p" -c 'import venv, ensurepip' >/dev/null 2>&1 && return 0
+  v="$(py_minor "$p")"
+  if have apt-get && have dpkg && dpkg -S "$(readlink -f "$p")" >/dev/null 2>&1; then
+    pkg="python$v-venv"
+    if apt-cache show "$pkg" >/dev/null 2>&1; then
+      need_sudo
+      run_soft "Install $pkg (needed to create the Python environment)" $SUDO apt-get install -y "$pkg" || return 1
+      "$p" -c 'import venv, ensurepip' >/dev/null 2>&1 && return 0
+    fi
+  fi
+  warn "Python $v at $p can't create virtual environments (venv/ensurepip missing)."
+  return 1
+}
 
 # ---------- 6. Ollama ----------
 say "Ollama (local LLM runtime)"
@@ -467,34 +525,20 @@ else
   run "Clone the repo" git clone --depth 1 "$REPO_URL" "$APP"
 fi
 
-# Reuse the venv only if it still works and is on a mediapipe-compatible
-# Python. A Homebrew/apt Python upgrade can leave an old venv pointing at an
-# interpreter that no longer exists -- then rebuild it from scratch.
-if [ -d "$VENV" ]; then
-  VV="$(py_minor "$VENV/bin/python")"
-  if py_supported "$VV" && "$VENV/bin/python" -m pip --version >/dev/null 2>&1; then
-    ok "Python environment OK (Python $VV)"
+# pip_sync: install / update the Python packages in $VENV, skipping
+# everything already at its newest allowed version. Returns non-zero on failure.
+pip_sync() {
+  # python -m pip (not the pip binary) is the robust way to self-upgrade pip.
+  if "$VENV/bin/python" -m pip list --outdated --format=freeze 2>/dev/null | grep -qi '^pip=='; then
+    run_soft "Update pip" "$VENV/bin/python" -m pip install --quiet --upgrade pip || return 1
   else
-    warn "Existing Python environment is broken or on an unsupported Python (${VV:-unknown}) -- rebuilding it."
-    run "Remove broken Python environment" rm -rf "$VENV"
+    ok "pip $("$VENV/bin/python" -m pip --version | awk '{print $2}') already latest"
   fi
-fi
-[ -d "$VENV" ] || run "Create Python environment" "$PYBIN" -m venv "$VENV"
-
-# python -m pip (not calling the pip binary directly) is the more robust way
-# to self-upgrade pip -- keeps this consistent with the Windows installer.
-if "$VENV/bin/python" -m pip list --outdated --format=freeze 2>/dev/null | grep -qi '^pip=='; then
-  run "Update pip" "$VENV/bin/python" -m pip install --quiet --upgrade pip
-else
-  ok "pip $("$VENV/bin/python" -m pip --version | awk '{print $2}') already latest"
-fi
-
-# Ask pip what an upgrade WOULD change (dry run, nothing installed), so
-# packages that are already installed at their newest allowed version are
-# skipped instead of reinstalled. Version caps in requirements.txt still apply.
-say "Python packages (checking installed versions against the latest)"
-PIP_PLAN="$("$VENV/bin/python" -m pip install --upgrade --dry-run --quiet --report - \
-             -r "$APP/requirements.txt" 2>>"$LOG" | "$VENV/bin/python" -c '
+  # Ask pip what an upgrade WOULD change (dry run, nothing installed), so
+  # packages already installed at their newest allowed version are skipped.
+  say "Python packages (checking installed versions against the latest)"
+  PIP_PLAN="$("$VENV/bin/python" -m pip install --upgrade --dry-run --quiet --report - \
+               -r "$APP/requirements.txt" 2>>"$LOG" | "$VENV/bin/python" -c '
 import json, sys
 try:
     d = json.load(sys.stdin)
@@ -502,13 +546,48 @@ except Exception:
     print("?"); sys.exit()
 print(" ".join("%s==%s" % (i["metadata"]["name"], i["metadata"]["version"]) for i in d.get("install", [])))
 ' 2>>"$LOG")"
-if [ -z "$PIP_PLAN" ]; then
-  ok "All Python packages already installed at their latest versions"
-else
+  if [ -z "$PIP_PLAN" ]; then
+    ok "All Python packages already installed at their latest versions"
+    return 0
+  fi
   [ "$PIP_PLAN" != "?" ] && echo "  ${DIM}to install/update: $PIP_PLAN${RST}"
-  run "Install / update Python packages (the big one, be patient)" \
+  run_soft "Install / update Python packages (the big one, be patient)" \
       "$VENV/bin/python" -m pip install --quiet --upgrade -r "$APP/requirements.txt"
-fi
+}
+
+venv_healthy() { [ -x "$VENV/bin/python" ] && "$VENV/bin/python" -m pip --version >/dev/null 2>&1; }
+
+# Try each candidate Python, newest first. The existing environment is kept
+# if it's healthy AND already on that Python; otherwise a new one is built.
+# A previous working environment is only deleted once the new one works.
+VENV_DONE=0
+for PYBIN in $PY_CANDIDATES; do
+  PYV="$(py_minor "$PYBIN")"
+  VV=""; venv_healthy && VV="$(py_minor "$VENV/bin/python")"
+  if [ -n "$VV" ] && { [ "$VV" = "$PYV" ] || { [ "$PLATFORM" = "mac" ] && py_supported "$VV"; }; }; then
+    ok "Python environment OK (Python $VV)"
+    pip_sync || die "Couldn't install the Python packages -- see $LOG"
+    VENV_DONE=1; break
+  fi
+
+  py_venv_ready "$PYBIN" || continue
+  if [ -n "$VV" ]; then
+    say "Moving the Python environment from Python $VV to the newer $PYV"
+  elif [ -d "$VENV" ]; then
+    warn "Existing Python environment is broken -- rebuilding it."
+  fi
+  rm -rf "$VENV.old"
+  [ -d "$VENV" ] && mv "$VENV" "$VENV.old"
+  if run_soft "Create Python environment (Python $PYV)" "$PYBIN" -m venv "$VENV" && pip_sync; then
+    rm -rf "$VENV.old"
+    VENV_DONE=1; break
+  fi
+  warn "Python $PYV didn't work for the app's packages (details in $LOG) -- trying the next one."
+  rm -rf "$VENV"
+  [ -d "$VENV.old" ] && mv "$VENV.old" "$VENV"
+done
+[ "$VENV_DONE" = "1" ] || die "Couldn't set up the Python environment with any installed Python ($(echo $PY_CANDIDATES)). See $LOG"
+ok "Using Python $(py_minor "$VENV/bin/python") for 2d.shorts"
 
 # ---------- 8. pull the model ----------
 if [ "${SHORTS_SKIP_MODELS:-}" != "1" ]; then

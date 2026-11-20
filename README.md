@@ -40,7 +40,7 @@ The installer will:
 
 4. Install everything (ffmpeg, Python env, Ollama, the model) and give you one new command: **`shorts`**
 
-**Updating:** just run the same install command again. Before touching anything it checks each package: if it's already installed at the latest version it's skipped, if it's older it's upgraded (and Ollama is restarted so the new version is the one running), if it's missing it's installed. The `shorts` command is added to the PATH for zsh, bash (both `~/.bashrc` and your login profile) and fish, whichever shell you use.
+**Updating:** just run the same install command again. Before touching anything it checks each package: if it's already installed at the latest version it's skipped, if it's older it's upgraded (and Ollama is restarted so the new version is the one running), if it's missing it's installed. On Linux it uses the newest Python you already have (3.13, 3.14, ...) instead of installing an older one, and only falls back to an older installed Python if the packages aren't available for the newest yet. The `shorts` command is added to the PATH for zsh, bash (both `~/.bashrc` and your login profile) and fish, whichever shell you use.
 
 ## Use
 

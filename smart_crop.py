@@ -39,6 +39,61 @@ try:
 except ImportError:
     _MEDIAPIPE_AVAILABLE = False
 
+# mediapipe 0.10.30+ (the only releases with wheels for Python 3.13 / 3.14)
+# removed the legacy `mediapipe.solutions` API. On those versions the face
+# detector comes from the Tasks API instead, which needs this small (~230 KB)
+# model file -- downloaded once into the data dir on first use.
+_FACE_MODEL_URL = ("https://storage.googleapis.com/mediapipe-models/face_detector/"
+                   "blaze_face_short_range/float16/latest/blaze_face_short_range.tflite")
+
+
+def _face_model_path() -> str:
+    import urllib.request
+    import paths
+    models = os.path.join(paths.data_dir(), "models")
+    os.makedirs(models, exist_ok=True)
+    dest = os.path.join(models, "blaze_face_short_range.tflite")
+    if not os.path.isfile(dest) or os.path.getsize(dest) == 0:
+        tmp = dest + ".part"
+        with urllib.request.urlopen(_FACE_MODEL_URL, timeout=60) as resp, open(tmp, "wb") as f:
+            shutil.copyfileobj(resp, f)
+        os.replace(tmp, dest)
+    return dest
+
+
+class _TasksFaceDetector:
+    """Adapter giving the mediapipe Tasks FaceDetector the same .process(rgb)
+    -> result.detections[*].location_data.relative_bounding_box shape as the
+    legacy solutions detector, so detect() below handles both identically."""
+
+    def __init__(self, min_confidence: float):
+        from types import SimpleNamespace
+        from mediapipe.tasks.python import vision
+        from mediapipe.tasks.python.core.base_options import BaseOptions
+        self._ns = SimpleNamespace
+        self._det = vision.FaceDetector.create_from_options(
+            vision.FaceDetectorOptions(
+                base_options=BaseOptions(model_asset_path=_face_model_path()),
+                min_detection_confidence=min_confidence,
+            )
+        )
+        image_cls = getattr(_mp, "Image", None)
+        fmt_cls = getattr(_mp, "ImageFormat", None)
+        if image_cls is None or fmt_cls is None:
+            from mediapipe.tasks.python.vision.core.image import Image as image_cls, ImageFormat as fmt_cls
+        self._image_cls, self._fmt = image_cls, fmt_cls
+
+    def process(self, rgb):
+        h, w = rgb.shape[:2]
+        res = self._det.detect(self._image_cls(image_format=self._fmt.SRGB, data=rgb))
+        dets = []
+        for d in (res.detections or []):
+            bb = d.bounding_box  # absolute pixels in the Tasks API
+            rel = self._ns(xmin=bb.origin_x / w, ymin=bb.origin_y / h,
+                           width=bb.width / w, height=bb.height / h)
+            dets.append(self._ns(location_data=self._ns(relative_bounding_box=rel)))
+        return self._ns(detections=dets)
+
 
 class _FaceDetector:
     """Wraps mediapipe's face detector (confirmed far more robust than Haar
@@ -81,6 +136,14 @@ class _FaceDetector:
                 self.backend = "mediapipe"
             except Exception:
                 self._mp_detectors = []
+            if not self._mp_detectors:
+                # Newer mediapipe without `solutions` -> Tasks API detector.
+                try:
+                    self._mp_detectors = [_TasksFaceDetector(min_confidence=0.4)]
+                    self.backend = "mediapipe"
+                except Exception as e:
+                    self._mp_detectors = []
+                    print(f"    (mediapipe face detector unavailable: {e} -- using Haar only)")
 
     def _haar_cascades(self):
         if self._frontal is None:
