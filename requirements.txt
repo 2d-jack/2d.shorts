@@ -13,5 +13,8 @@ opencv-contrib-python>=4.9,<5
 scenedetect>=0.6.4
 
 # Face detection (much better than the Haar-only fallback; the code degrades
-# gracefully if this wheel isn't available for your Python version)
-mediapipe>=0.10.14
+# gracefully if this wheel isn't available for your Python version).
+# Capped below 0.10.30: newer releases (0.10.31+, 1.x) ship without the legacy
+# `mediapipe.solutions` API that smart_crop.py uses, so an unpinned upgrade
+# would silently drop face tracking back to the much weaker Haar-only path.
+mediapipe>=0.10.14,<0.10.30

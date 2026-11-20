@@ -40,6 +40,8 @@ The installer will:
 
 4. Install everything (ffmpeg, Python env, Ollama, the model) and give you one new command: **`shorts`**
 
+**Updating:** just run the same install command again. Before touching anything it checks each package: if it's already installed at the latest version it's skipped, if it's older it's upgraded (and Ollama is restarted so the new version is the one running), if it's missing it's installed. The `shorts` command is added to the PATH for zsh, bash (both `~/.bashrc` and your login profile) and fish, whichever shell you use.
+
 ## Use
 
 ```
